@@ -1,5 +1,9 @@
 # An email client for safety (not security)
 
+An initial proof of concept is implemented. See [PROTOTYPE.md](PROTOTYPE.md) for
+demo launch instructions, T-Online setup, validation, and current limitations.
+The requirements below remain the product specification.
+
 A small, receive-only desktop email client for a visually impaired user running
 Ubuntu. The application should make ordinary email easier to read and make
 potential phishing attempts much harder to act on accidentally.
