@@ -1,4 +1,4 @@
-# An email client with UX optimized for safety (not security)
+# An email client for safety (not security)
 
 A small, receive-only desktop email client for a visually impaired user running
 Ubuntu. The application should make ordinary email easier to read and make
