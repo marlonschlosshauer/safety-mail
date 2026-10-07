@@ -90,9 +90,15 @@ new windows.
 
 ### Screening service
 
-Prefer a small authenticated server endpoint, such as a Vercel Function, between
-the desktop application and Vercel AI Gateway. It keeps the shared Gateway API
-key out of the Electron bundle and provides rate limiting and request validation.
+Use a small authenticated server endpoint, such as a Vercel Function, between the
+desktop application and Vercel AI Gateway. The endpoint keeps the shared
+`AI_GATEWAY_API_KEY` out of the Electron bundle and provides request validation,
+rate limiting, usage controls, and one place to observe screening failures.
+
+The endpoint calls TypeSafe AI's Jev model through AI Gateway using the model ID
+`typesafe-ai/jev`. Use the Vercel AI SDK decision API rather than a chat or text
+generation API. AI Gateway remains the integration boundary for authentication,
+billing, and model access; Jev is the selected decision model.
 
 For a strictly personal build, a user-owned API key may instead be stored locally,
 but no reusable project credential should be compiled into or shipped with the
@@ -187,8 +193,14 @@ If HTML display is added later:
 
 ## Phishing screening
 
-The LLM is one signal, not an authority. Screening should combine deterministic
-checks with a structured model assessment.
+Jev is not a general-purpose LLM and does not generate an explanation. It is a
+probabilistic decision model: the application supplies shared state and typed
+questions, and Jev returns choices, scores, or boolean probabilities. Multiple
+questions can be evaluated in one request.
+
+The Jev result is one signal, not an authority. Screening should combine
+deterministic checks with Jev's assessment, and the application must remain in
+control of thresholds, warning text, and permitted actions.
 
 ### Deterministic signals
 
@@ -201,9 +213,9 @@ checks with a structured model assessment.
 - Suspicious attachment extensions or misleading double extensions.
 - Provider authentication and spam results, when their provenance is trusted.
 
-### Model input
+### Jev input
 
-Send a bounded, normalized representation rather than arbitrary raw MIME:
+Send a bounded, normalized object as Jev's `state`, never arbitrary raw MIME:
 
 - `From`, `Reply-To`, `Return-Path`, and subject.
 - Plain-text body.
@@ -211,40 +223,101 @@ Send a bounded, normalized representation rather than arbitrary raw MIME:
 - Attachment metadata.
 - Deterministic findings.
 
-Email contents must be delimited and described as hostile, untrusted data. The
-model receives no tools and cannot initiate actions. This reduces, but does not
-eliminate, prompt-injection risk.
+Strip fields that are not needed for screening and enforce length limits before
+the request leaves the device. Describe message text as hostile, untrusted data;
+instructions contained in an email are evidence to classify, not instructions
+for Jev or the application. Jev receives no tools and cannot initiate actions.
 
-### Model output
+### Decision contract
 
-Require schema-validated structured output, for example:
+Use the Vercel AI SDK's decision API and the Gateway decision-model adapter. The
+API is currently experimental, so pin compatible `ai` and `@ai-sdk/gateway`
+versions and cover the response handling with contract tests.
 
 ```ts
-type PhishingAssessment = {
-  risk: "low" | "medium" | "high";
-  confidence: number;
-  reasons: string[];
-  suspiciousLinks: string[];
-  recommendedAction: string;
-};
+import { gateway } from "@ai-sdk/gateway";
+import { experimental_decide as decide } from "ai";
+
+const result = await decide({
+  model: gateway.decisionModel("typesafe-ai/jev"),
+  state: screeningInput,
+  questions: {
+    risk: {
+      type: "choice",
+      instructions:
+        "Classify the likelihood that this email is a phishing attempt.",
+      criteria: {
+        low: "No material phishing evidence is present.",
+        medium: "Some evidence is suspicious or ambiguous and needs caution.",
+        high: "Strong evidence indicates credential theft, fraud, or impersonation.",
+        insufficient_evidence:
+          "The supplied state is insufficient to classify.",
+      },
+    },
+    requestsSecret: {
+      type: "boolean",
+      instructions:
+        "Does the email ask for a password, login, or security code?",
+    },
+    requestsMoney: {
+      type: "boolean",
+      instructions: "Does the email ask for a payment or financial transfer?",
+    },
+    usesDeceptiveLinks: {
+      type: "boolean",
+      instructions: "Do the link labels or destinations appear deceptive?",
+    },
+    impersonatesTrustedParty: {
+      type: "boolean",
+      instructions:
+        "Does the email appear to impersonate a trusted person or organization?",
+    },
+  },
+});
 ```
 
-Reject malformed responses. Timeouts, provider errors, or rejected responses
-produce an `unavailable`/`not_checked` state rather than a low-risk result.
+Choice answers contain the selected label and may include a probability
+distribution. Boolean answers contain the probability that the statement is
+true. A low boolean probability means Jev favors `false`; it is not a generic
+confidence score. Do not ask Jev for free-form reasons or a recommended action.
+Instead, map deterministic findings and thresholded boolean answers to fixed,
+human-written warning text.
+
+Choose thresholds using a representative labeled test set, with false negatives
+weighted more heavily than false positives. Keep an explicit review band around
+uncertain results and store the model ID, question-set version, answers, and
+threshold version with each assessment. Recalibrate before changing the model,
+provider route, questions, or thresholds.
+
+Validate the returned answer keys and numeric ranges. Timeouts, provider errors,
+malformed answers, or `insufficient_evidence` produce an
+`unavailable`/`not_checked` state rather than a low-risk result. Deterministic
+high-risk findings must still trigger a warning even when Jev returns `low`.
 
 The UI should use language such as `No obvious warning signs found` instead of
 `This email is safe`.
 
 ### Privacy
 
-Email contents are personal data. Use Vercel AI Gateway's no-training control and,
-where available for the selected plan and provider, zero-data-retention routing.
-Document which fields leave the device and obtain the account owner's consent.
+Email contents are personal data. TypeSafe AI's privacy policy says it does not
+train or fine-tune models on customer input, but the current AI Gateway listing
+does not advertise zero-data-retention for Jev. Do not treat no-training as
+no-retention. Before release, verify and document the retention, processing
+region, and subprocessors for Vercel and the selected Jev provider.
+
+Pin the reviewed provider route where possible and do not add fallback providers
+without a separate privacy review. Document exactly which fields leave the
+device, minimize them, and obtain the account owner's informed consent. If the
+required data-handling guarantees are unavailable, keep screening local or do not
+send message contents.
 
 References:
 
-- [Vercel AI Gateway SDKs and APIs](https://vercel.com/docs/ai-gateway/sdks-and-apis)
-- [Vercel AI Gateway privacy controls](https://vercel.com/changelog/zero-data-retention-no-prompt-training-on-ai-gateway)
+- [Vercel AI Gateway](https://vercel.com/docs/ai-gateway)
+- [Jev on Vercel AI Gateway](https://vercel.com/ai-gateway/models/jev)
+- [Vercel AI SDK decision API](https://vercel.com/i/ai-sdk-evaluation-to-decisions)
+- [TypeSafe AI](https://typesafe.ai/)
+- [TypeSafe AI privacy policy](https://typesafe.ai/legal/privacy-policy)
 
 ## Credential storage
 
@@ -329,3 +402,4 @@ Database writes for messages and synchronization cursors should be transactional
 - The IMAP password and Gateway key never reach the React renderer.
 - The primary inbox and reader flows work with keyboard-only navigation, large
   text, and a screen reader.
+- It is okay to mock the AI integration in the very first steps.
